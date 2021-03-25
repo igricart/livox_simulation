@@ -255,6 +255,8 @@ namespace gazebo
 		double dist;
 		std::string entityName;
 
+		ROS_INFO("PutLaserData");
+
 		this->cloud_msg_.points.clear();
 		this->cloud_msg_.channels.clear();
 
@@ -264,6 +266,7 @@ namespace gazebo
 
 		ignition::math::Pose3d offset;
 		offset = this->collision_ptr_->RelativePose();
+		ROS_INFO("Printing collision in X, Y, Z as %d, %d, %d", offset.Pos().X(), offset.Pos().Y(), offset.Pos().Z());
 		ignition::math::Vector3d offset_rot = offset.Rot().Euler();
 
 		ignition::math::Quaterniond rot_only;
