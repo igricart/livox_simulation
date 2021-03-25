@@ -12,7 +12,7 @@ namespace gazebo
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructor
-	ArtiGazeboLaserLivox::ArtiGazeboLaserLivox()
+	ArtiGazeboLaserLivox::ArtiGazeboLaserLivox() : nh_(NULL)
 	{
 	}
 
@@ -22,9 +22,14 @@ namespace gazebo
 	{
 		this->laser_queue_.clear();
 		this->laser_queue_.disable();
-		this->rosnode_->shutdown();
+		this->nh_->shutdown();
+		if (this->nh_)
+		{
+			this->nh_->shutdown();
+			delete this->nh_;
+			this->nh_ = NULL;
+		}
 		this->callback_queue_thread_.join();
-		delete this->rosnode_;
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -32,6 +37,10 @@ namespace gazebo
 	void ArtiGazeboLaserLivox::Load(sensors::SensorPtr _parent, sdf::ElementPtr _sdf)
 	{
 		RayPlugin::Load(_parent, this->sdf);
+
+		// Initialize Gazebo node
+		gazebo_node_ = gazebo::transport::NodePtr(new gazebo::transport::Node());
+		gazebo_node_->Init();
 
 		this->parent_sensor_ = _parent;
 		std::string worldName = _parent->WorldName();
@@ -41,15 +50,14 @@ namespace gazebo
 		this->sdf = _sdf;
 
 		GAZEBO_SENSORS_USING_DYNAMIC_POINTER_CAST;
-		this->parent_ray_sensor_ =
-			dynamic_pointer_cast<sensors::RaySensor>(this->parent_sensor_);
+		this->parent_ray_sensor_ = dynamic_pointer_cast<sensors::RaySensor>(this->parent_sensor_);
 
 		if (!this->parent_ray_sensor_)
 			gzthrow("ArtiGazeboLaserLivox controller requires a Ray-Sensor as it's parent");
 
-		this->robot_namespace_ = "";
+		this->robot_namespace_ = "/";
 		if (this->sdf->HasElement("robotNamespace"))
-			this->robot_namespace_ = this->sdf->Get<std::string>("robotNamespace") + "/";
+			this->robot_namespace_ = this->sdf->GetElement("robotNamespace")->Get<std::string>();
 
 		if (!this->sdf->HasElement("frameName"))
 		{
@@ -57,7 +65,7 @@ namespace gazebo
 			this->frame_name_ = "/world";
 		}
 		else
-			this->frame_name_ = this->sdf->Get<std::string>("frameName");
+			this->frame_name_ = this->sdf->GetElement("frameName")->Get<std::string>();
 
 		if (!this->sdf->HasElement("topicName"))
 		{
@@ -65,7 +73,7 @@ namespace gazebo
 			this->topic_name_ = "/laser/livox40";
 		}
 		else
-			this->topic_name_ = this->sdf->Get<std::string>("topicName");
+			this->topic_name_ = this->sdf->GetElement("topicName")->Get<std::string>();
 
 		if (!this->sdf->HasElement("updateRate"))
 		{
@@ -73,7 +81,7 @@ namespace gazebo
 			this->update_rate_ = 0;
 		}
 		else
-			this->update_rate_ = this->sdf->Get<double>("updateRate");
+			this->update_rate_ = this->sdf->GetElement("updateRate")->Get<double>();
 
 		if (!this->sdf->HasElement("samples"))
 		{
@@ -81,7 +89,7 @@ namespace gazebo
 			this->samples_ = 30;
 		}
 		else
-			this->samples_ = this->sdf->Get<int>("samples");
+			this->samples_ = this->sdf->GetElement("samples")->Get<int>();
 
 		if (!this->sdf->HasElement("numDoubleEllipses"))
 		{
@@ -89,7 +97,7 @@ namespace gazebo
 			this->num_ellipses_ = 1;
 		}
 		else
-			this->num_ellipses_ = this->sdf->Get<int>("numDoubleEllipses");
+			this->num_ellipses_ = this->sdf->GetElement("numDoubleEllipses")->Get<int>();
 
 		if (!this->sdf->HasElement("rotationIncrement"))
 		{
@@ -97,7 +105,7 @@ namespace gazebo
 			this->rotation_increment_ = 0.2;
 		}
 		else
-			this->rotation_increment_ = this->sdf->Get<float>("rotationIncrement");
+			this->rotation_increment_ = this->sdf->GetElement("rotationIncrement")->Get<float>();
 
 		if (!this->sdf->HasElement("interpolationPoints"))
 		{
@@ -105,7 +113,7 @@ namespace gazebo
 			this->interpolation_points_ = 10;
 		}
 		else
-			this->interpolation_points_ = this->sdf->Get<unsigned int>("interpolationPoints");
+			this->interpolation_points_ = this->sdf->GetElement("interpolationPoints")->Get<unsigned int>();
 
 		if (!this->sdf->HasElement("maxInterpolationDistance"))
 		{
@@ -113,7 +121,7 @@ namespace gazebo
 			this->max_interpolation_distance_ = 1.0;
 		}
 		else
-			this->max_interpolation_distance_ = this->sdf->Get<float>("maxInterpolationDistance");
+			this->max_interpolation_distance_ = this->sdf->GetElement("maxInterpolationDistance")->Get<float>();
 
 		if (!this->sdf->HasElement("minRange"))
 		{
@@ -121,7 +129,7 @@ namespace gazebo
 			this->min_range_ = 0.0;
 		}
 		else
-			this->min_range_ = this->sdf->Get<float>("minRange");
+			this->min_range_ = this->sdf->GetElement("minRange")->Get<float>();
 
 		if (!this->sdf->HasElement("maxRange"))
 		{
@@ -129,7 +137,7 @@ namespace gazebo
 			this->max_range_ = 30.0;
 		}
 		else
-			this->max_range_ = this->sdf->Get<float>("maxRange");
+			this->max_range_ = this->sdf->GetElement("maxRange")->Get<float>();
 
 		if (this->update_rate_ > 0.0)
 			this->update_period_ = 1.0 / this->update_rate_;
@@ -138,18 +146,45 @@ namespace gazebo
 
 		this->connect_count_ = 0;
 
-		if (ros::isInitialized())
+		// Make sure the ROS node for Gazebo has already been initialized
+		if (!ros::isInitialized())
 		{
-			this->deferred_load_thread_ = boost::thread(boost::bind(&ArtiGazeboLaserLivox::LoadThread, this));
+			ROS_FATAL_STREAM("A ROS node for Gazebo has not been initialized, unable to load plugin. "
+							 << "Load the Gazebo system plugin 'libgazebo_ros_api_plugin.so' in the gazebo_ros package)");
+			return;
 		}
-		else
+
+		// Create node handle
+		this->nh_ = new ros::NodeHandle(this->robot_namespace_);
+
+		// Resolve tf prefix
+		std::string prefix;
+		nh_->getParam(std::string("tf_prefix"), prefix);
+		if (robot_namespace_ != "/")
 		{
-			gzerr << "ERROR: ROS hasn't been initialized!\n";
+			prefix = robot_namespace_;
 		}
+		boost::trim_right_if(prefix, boost::is_any_of("/"));
+		frame_name_ = tf::resolve(prefix, frame_name_);
+
+		// Advertise publisher with a custom callback queue
+		if (topic_name_ != "")
+		{
+			ros::AdvertiseOptions ao = ros::AdvertiseOptions::create<sensor_msgs::PointCloud2>(
+				topic_name_, 1,
+				boost::bind(&ArtiGazeboLaserLivox::Connect, this),
+				boost::bind(&ArtiGazeboLaserLivox::Disconnect, this),
+				ros::VoidPtr(), &laser_queue_);
+			pub_ = nh_->advertise(ao);
+		}
+
+		// this->pub1_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part1", 1);
+		// this->pub2_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part2", 1);
+		// this->pub3_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part3", 1);
+		// this->pub4_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part4", 1);
 
 		collision_ptr_list_.clear();
 
-		this->parent_ray_sensor_->SetActive(false);
 		// Create number of ellipse-8-figures
 		double increment = 180.0 / this->num_ellipses_;
 		for (int i = 0; i < this->num_ellipses_; i++)
@@ -158,35 +193,6 @@ namespace gazebo
 		}
 
 		this->last_update_time_ = common::Time(0);
-
-		this->parent_ray_sensor_->SetActive(true);
-	}
-
-	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	// Load Thread
-	void ArtiGazeboLaserLivox::LoadThread()
-	{
-		this->rosnode_ = new ros::NodeHandle(this->robot_namespace_);
-
-		std::string prefix;
-		this->rosnode_->getParam(std::string("tf_prefix"), prefix);
-		this->frame_name_ = tf::resolve(prefix, this->frame_name_);
-
-		if (this->topic_name_ != "")
-		{
-			ros::AdvertiseOptions ao;
-			ao = ros::AdvertiseOptions::create<sensor_msgs::PointCloud2>(this->topic_name_, 1,
-																		 boost::bind(&ArtiGazeboLaserLivox::Connect, this),
-																		 boost::bind(&ArtiGazeboLaserLivox::Disconnect, this),
-																		 ros::VoidPtr(), &this->laser_queue_);
-
-			this->pub_ = this->rosnode_->advertise(ao);
-
-			this->pub1_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part1", 1);
-			this->pub2_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part2", 1);
-			this->pub3_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part3", 1);
-			this->pub4_ = rosnode_->advertise<sensor_msgs::PointCloud>("laser_part4", 1);
-		}
 
 		this->parent_ray_sensor_->SetActive(false);
 
@@ -200,6 +206,31 @@ namespace gazebo
 	{
 		this->connect_count_++;
 		this->parent_ray_sensor_->SetActive(true);
+
+		boost::lock_guard<boost::mutex> lock(lock_);
+		if (pub_.getNumSubscribers())
+		{
+			if (!sub_)
+			{
+#if GAZEBO_MAJOR_VERSION >= 7
+				sub_ = gazebo_node_->Subscribe(this->parent_ray_sensor_->Topic(), &ArtiGazeboLaserLivox::OnScan, this);
+#else
+				sub_ = gazebo_node_->Subscribe(this->parent_ray_sensor_->GetTopic(), &ArtiGazeboLaserLivox::OnScan, this);
+#endif
+			}
+			parent_ray_sensor_->SetActive(true);
+		}
+		else
+		{
+#if GAZEBO_MAJOR_VERSION >= 7
+			if (sub_)
+			{
+				sub_->Unsubscribe();
+				sub_.reset();
+			}
+#endif
+			parent_ray_sensor_->SetActive(false);
+		}
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -214,6 +245,37 @@ namespace gazebo
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Create new Laserscan
+	void ArtiGazeboLaserLivox::OnScan(ConstLaserScanStampedPtr& _msg)
+	{
+		if (this->topic_name_ != "")
+		{
+#if GAZEBO_MAJOR_VERSION >= 8
+			common::Time cur_time = this->world_->SimTime();
+#else
+			common::Time cur_time = this->world_->GetSimTime();
+#endif
+			if (cur_time < this->last_update_time_)
+			{
+				ROS_WARN_NAMED("livox", "WARNING: Current time was negative (smaller than last-update-time).");
+				this->last_update_time_ = cur_time;
+			}
+
+			if (cur_time - this->last_update_time_ >= this->update_period_)
+			{
+				common::Time sensor_update_time = this->parent_sensor_->LastUpdateTime();
+				// timeval dt;
+				// dt.tv_sec = 1;
+				// dt.tv_usec = 200;
+				// sensor_update_time -= dt;
+				this->PutLaserData(last_update_time_);
+				this->last_update_time_ = cur_time;
+			}
+		}
+		else
+		{
+			ROS_ERROR_NAMED("livox", "ERROR: Topic for Livox-lidar not set!");
+		}
+	}
 	void ArtiGazeboLaserLivox::OnNewLaserScans()
 	{
 		if (this->topic_name_ != "")
@@ -272,10 +334,10 @@ namespace gazebo
 		ignition::math::Quaterniond rot_only;
 		if (this->current_rot_angle_ + this->rotation_increment_ >= M_PI)
 			rot_only.EulerToQuaternion(ignition::math::Vector3d(this->current_rot_angle_ + this->rotation_increment_ - M_PI + offset_rot.X(),
-													 offset_rot.Y(), offset_rot.Z()));
+																offset_rot.Y(), offset_rot.Z()));
 		else
 			rot_only.EulerToQuaternion(ignition::math::Vector3d(this->current_rot_angle_ + this->rotation_increment_ + offset_rot.X(),
-														  offset_rot.Y(), offset_rot.Z()));
+																offset_rot.Y(), offset_rot.Z()));
 		offset.Rot() = rot_only;
 
 		bool has_prev_value = false;
@@ -417,7 +479,7 @@ namespace gazebo
 	{
 		static const double timeout = 0.01;
 
-		while (this->rosnode_->ok())
+		while (this->nh_->ok())
 		{
 			this->laser_queue_.callAvailable(ros::WallDuration(timeout));
 		}
